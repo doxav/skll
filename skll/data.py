@@ -29,9 +29,9 @@ from collections import namedtuple
 from joblib.pool import MemmapingPool
 from six import iteritems, PY2, string_types, text_type
 from six.moves import map, zip
-# from sklearn.feature_extraction import DictVectorizer, FeatureHasher
-from sklearn.feature_extraction import FeatureHasher
-from DictVectorizer import DictVectorizer
+from sklearn.feature_extraction import DictVectorizer, FeatureHasher
+# from sklearn.feature_extraction import FeatureHasher
+# from DictVectorizer import DictVectorizer
 
 # Import QueueHandler and QueueListener for multiprocess-safe logging
 if PY2:
@@ -701,13 +701,16 @@ def _get_mldata_from_gen(example_iter_type, path, quiet, sparse, label_col,
             if feature_hasher:
                 feat_vectorizer = FeatureHasher(n_features=num_features)
             else:
-                feat_vectorizer = DictVectorizer(sparse=sparse)
+                feat_vectorizer = DictVectorizer(sparse=sparse, enable_onehost_inverse=True)
 
+        # num_features=10
+        # feat_vectorizer = FeatureHasher(n_features=num_features, input_type='string')
         ids, class_names, features = [], [], []
         for id, class_name, feature in example_iter:
             ids.append(id)
             class_names.append(class_name)
-            features.append(feature)
+            features.append(feat_vectorizer.fit_transform(iter([feature])))
+            # a = feat_vectorizer.fit_transform(feature)
 
         ids = np.asarray(ids)
         class_names = np.asarray(class_names)
@@ -1168,7 +1171,7 @@ def _write_libsvm_file(path, ids, classes, features, feat_vectorizer, label_map,
         feat_vectorizer = DictVectorizer(sparse=True)
     if not feat_vectorizer.vocabulary_:
         feat_vectorizer.fit(features)
-    _features = feat_vectorizer.inverse_transform(feat_vectorizer.transform(features), reverse_onehot=False)
+    _features = feat_vectorizer.inverse_transform(feat_vectorizer.transform(features))
 
     with open(path, 'w') as f:
         # Iterate through examples
@@ -1229,7 +1232,7 @@ def _write_megam_file(path, ids, classes, features, feat_vectorizer=None):
         feat_vectorizer = DictVectorizer(sparse=True)
     if not feat_vectorizer.vocabulary_:
         feat_vectorizer.fit(features)
-    _features = feat_vectorizer.inverse_transform(feat_vectorizer.transform(features), reverse_onehot=False)
+    _features = feat_vectorizer.inverse_transform(feat_vectorizer.transform(features))
 
     with open(path, 'w') as f:
         # Iterate through examples

@@ -145,7 +145,7 @@ class DictVectorizer(BaseEstimator, TransformerMixin):
         self.fit(X)
         return self.transform(X)
 
-    def inverse_transform(self, X, dict_type=dict, reverse_onehot=True):
+    def inverse_transform(self, X, dict_type=dict, inverse_onehot=True):
         """Transform array or sparse matrix X back to feature mappings.
 
         X must have been produced by this DictVectorizer's transform or
