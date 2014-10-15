@@ -39,10 +39,9 @@ if PY2:
 else:
     from logging.handlers import QueueHandler, QueueListener
 
-MAX_CONCURRENT_PROCESSES = int(os.getenv('SKLL_MAX_CONCURRENT_PROCESSES', '5'))
+MAX_CONCURRENT_PROCESSES = int(os.getenv('SKLL_MAX_CONCURRENT_PROCESSES', '1'))
 
-ExamplesTuple = namedtuple('ExamplesTuple', ['ids', 'classes', 'features',
-                                             'feat_vectorizer'])
+ExamplesTuple = namedtuple('ExamplesTuple', ['ids', 'classes', 'features', 'feat_vectorizer'])
 
 # Register dialect for handling ARFF files
 if sys.version_info >= (3, 0):
@@ -100,6 +99,7 @@ class _DictIter(object):
                 sys.stderr.flush()
             with open(self.path_or_list, file_mode) as f:
                 for ret_tuple in self._sub_iter(f):
+                    # print(ret_tuple)
                     yield ret_tuple
         else:
             if not self.quiet:
@@ -639,8 +639,7 @@ def _classes_for_iter_type(example_iter_type, path, label_col, class_map):
     generator (and whether or not the examples have labels).
     '''
     try:
-        example_iter = example_iter_type(path, label_col=label_col,
-                                         class_map=class_map)
+        example_iter = example_iter_type(path, label_col=label_col, class_map=class_map)
         res_array = np.array([class_name for _, class_name, _ in example_iter])
     except Exception as e:
         # Setup logger
@@ -658,8 +657,7 @@ def _features_for_iter_type(example_iter_type, path, quiet, sparse, label_col,
     have labels).
     '''
     try:
-        example_iter = example_iter_type(path, quiet=quiet,
-                                         label_col=label_col)
+        example_iter = example_iter_type(path, quiet=quiet, label_col=label_col)
         if not feat_vectorizer:
             if feature_hasher:
                 feat_vectorizer = FeatureHasher(n_features=num_features)
@@ -683,6 +681,46 @@ def _features_for_iter_type(example_iter_type, path, quiet, sparse, label_col,
 
     return features, feat_vectorizer
 
+
+def _get_mldata_from_gen(example_iter_type, path, quiet, sparse, label_col,
+                            feature_hasher, num_features,
+                            feat_vectorizer=None, class_map=None, ids_to_floats=None,
+                            get_raw_generator=False):
+    '''
+    Helper to get all data from ids, classes, features generators and one-hot-encode if needed
+    have labels).
+    '''
+    try:
+        example_iter = example_iter_type(path,
+                                         class_map=class_map,
+                                         ids_to_floats=ids_to_floats,
+                                         quiet=quiet,
+                                         label_col=label_col)
+
+        if not feat_vectorizer:
+            if feature_hasher:
+                feat_vectorizer = FeatureHasher(n_features=num_features)
+            else:
+                feat_vectorizer = DictVectorizer(sparse=sparse)
+
+        ids, class_names, features = [], [], []
+        for id, class_name, feature in example_iter:
+            ids.append(id)
+            class_names.append(class_name)
+            features.append(feature)
+
+        ids = np.asarray(ids)
+        class_names = np.asarray(class_names)
+        if feature_hasher:
+            features = feat_vectorizer.transform((features))
+        else:
+            features = feat_vectorizer.fit_transform(iter(features))
+    except Exception:
+        logger = logging.getLogger(__name__)
+        logger.error('The last feature file did not include any features.')
+        raise
+
+    return ids, class_names, features, feat_vectorizer
 
 def load_examples(path, quiet=False, sparse=True, label_col='y',
                   ids_to_floats=False, class_map=None, feature_hasher=False,
@@ -772,29 +810,37 @@ def load_examples(path, quiet=False, sparse=True, label_col='y',
     if example_iter_type == _DummyDictIter:
         path = list(path)
 
-    # Create thread/process-safe logger stuff
-    queue = Queue(-1)
-    q_handler = QueueHandler(queue)
-    logger = logging.getLogger(__name__)
-    logger.addHandler(q_handler)
-    q_listener = QueueListener(queue)
-    q_listener.start()
-
     # Create generators that we can use to create numpy arrays without wasting
     # memory (even though this requires reading the file multiple times).
     # Do this using a process pool so that we can clear out the temporary
     # variables more easily and do these in parallel.
     if MAX_CONCURRENT_PROCESSES == 1:
-        ids = _ids_for_iter_type(example_iter_type, path, ids_to_floats)
-        classes = _classes_for_iter_type(example_iter_type, path, label_col,
-                                         class_map)
-        features, feat_vectorizer = _features_for_iter_type(example_iter_type,
-                                                            path, quiet,
-                                                            sparse, label_col,
-                                                            feature_hasher,
-                                                            num_features,
-                                                            feat_vectorizer)
+        ids, classes, features, feat_vectorizer = _get_mldata_from_gen(example_iter_type,
+                                                                    path, quiet, sparse, label_col,
+                                                                    feature_hasher, num_features,
+                                                                    feat_vectorizer,
+                                                                    class_map=class_map,
+                                                                    ids_to_floats=ids_to_floats)
+
+        # ids = _ids_for_iter_type(example_iter_type, path, ids_to_floats)
+        # classes = _classes_for_iter_type(example_iter_type, path, label_col,
+        #                                  class_map)
+        # features, feat_vectorizer = _features_for_iter_type(example_iter_type,
+        #                                                     path, quiet,
+        #                                                     sparse, label_col,
+        #                                                     feature_hasher,
+        #                                                     num_features,
+        #                                                     feat_vectorizer)
+
     else:
+        # # Create thread/process-safe logger stuff
+        queue = Queue(-1)
+        q_handler = QueueHandler(queue)
+        logger = logging.getLogger(__name__)
+        logger.addHandler(q_handler)
+        q_listener = QueueListener(queue)
+        q_listener.start()
+
         pool = MemmapingPool(min(3, MAX_CONCURRENT_PROCESSES))
 
         ids_result = pool.apply_async(_ids_for_iter_type,
@@ -817,9 +863,9 @@ def load_examples(path, quiet=False, sparse=True, label_col='y',
         # Need to call terminate to clear up temporary directory
         pool.terminate()
 
-    # Tear-down thread/process-safe logging and switch back to regular
-    q_listener.stop()
-    logger.removeHandler(q_handler)
+        # Tear-down thread/process-safe logging and switch back to regular
+        q_listener.stop()
+        logger.removeHandler(q_handler)
 
     # Make sure we have the same number of ids, classes, and features
     assert ids.shape[0] == classes.shape[0] == features.shape[0]
@@ -1379,7 +1425,6 @@ def write_feature_file(path, ids, classes, features, feat_vectorizer=None,
 
     # Convert feature array to list of dicts if given a feat vectorizer,
     # otherwise fail.  Only necessary if we were given an array.
-    print(features)
     if isinstance(features, np.ndarray) or feat_vectorizer:
         if feat_vectorizer is None:
             raise ValueError('If `feat_vectorizer` is unspecified, you must '
