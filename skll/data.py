@@ -651,7 +651,7 @@ def _classes_for_iter_type(example_iter_type, path, label_col, class_map):
 
 
 def _features_for_iter_type(example_iter_type, path, quiet, sparse, label_col,
-                            feature_hasher, num_features):
+                            feature_hasher, num_features, feat_vectorizer=None):
     '''
     Little helper function to return a sparse matrix of features and feature
     vectorizer for a given example generator (and whether or not the examples
@@ -660,10 +660,11 @@ def _features_for_iter_type(example_iter_type, path, quiet, sparse, label_col,
     try:
         example_iter = example_iter_type(path, quiet=quiet,
                                          label_col=label_col)
-        if feature_hasher:
-            feat_vectorizer = FeatureHasher(n_features=num_features)
-        else:
-            feat_vectorizer = DictVectorizer(sparse=sparse)
+        if not feat_vectorizer:
+            if feature_hasher:
+                feat_vectorizer = FeatureHasher(n_features=num_features)
+            else:
+                feat_vectorizer = DictVectorizer(sparse=sparse)
         feat_dict_generator = map(itemgetter(2), example_iter)
     except Exception:
         # Setup logger
@@ -679,13 +680,13 @@ def _features_for_iter_type(example_iter_type, path, quiet, sparse, label_col,
         logger = logging.getLogger(__name__)
         logger.error('The last feature file did not include any features.')
         raise
-    a=feat_vectorizer.inverse_transform(features)
+
     return features, feat_vectorizer
 
 
 def load_examples(path, quiet=False, sparse=True, label_col='y',
                   ids_to_floats=False, class_map=None, feature_hasher=False,
-                  num_features=None):
+                  num_features=None, feat_vectorizer=None):
     '''
     Loads examples in the ``.arff``, ``.csv``, ``.jsonlines``, ``.libsvm``,
     ``.megam``, ``.ndj``, or ``.tsv`` formats.
@@ -791,7 +792,8 @@ def load_examples(path, quiet=False, sparse=True, label_col='y',
                                                             path, quiet,
                                                             sparse, label_col,
                                                             feature_hasher,
-                                                            num_features)
+                                                            num_features,
+                                                            feat_vectorizer)
     else:
         pool = MemmapingPool(min(3, MAX_CONCURRENT_PROCESSES))
 
@@ -804,7 +806,7 @@ def load_examples(path, quiet=False, sparse=True, label_col='y',
         features_result = pool.apply_async(_features_for_iter_type,
                                            args=(example_iter_type, path,
                                                  quiet, sparse, label_col,
-                                                 feature_hasher, num_features))
+                                                 feature_hasher, num_features, feat_vectorizer))
 
         # Wait for processes to complete and store results
         pool.close()
@@ -1080,7 +1082,7 @@ def _write_jsonlines_file(path, ids, classes, features):
             print(json.dumps(example_dict, sort_keys=True), file=f)
 
 
-def _write_libsvm_file(path, ids, classes, features, feat_vectorizer, label_map):
+def _write_libsvm_file(path, ids, classes, features, feat_vectorizer, label_map, allow_zero=True):
     '''
     Writes a feature file in .libsvm format with the given a list of IDs,
     classes, and features.
@@ -1116,18 +1118,18 @@ def _write_libsvm_file(path, ids, classes, features, feat_vectorizer, label_map)
         # Add fake item to vectorizer for None
         label_map[None] = '00000'
     # Create feature vectorizer if unspecified and writing libsvm
-    if feat_vectorizer is None or not feat_vectorizer.vocabulary_:
+    if feat_vectorizer is None:
         feat_vectorizer = DictVectorizer(sparse=True)
+    if not feat_vectorizer.vocabulary_:
         feat_vectorizer.fit(features)
-    features_ = feat_vectorizer.transform(features)
-    features_ = feat_vectorizer.inverse_transform(features_, reverse_onehot=False)
+    _features = feat_vectorizer.inverse_transform(feat_vectorizer.transform(features), reverse_onehot=False)
 
     with open(path, 'w') as f:
         # Iterate through examples
-        for ex_id, class_name, feature_dict in zip(ids, classes, features_):
+        for ex_id, class_name, feature_dict in zip(ids, classes, _features):
             field_values = [(feat_vectorizer.vocabulary_[field] + 1, value) for
                             field, value in iteritems(feature_dict)
-                            if Decimal(value) != 0]
+                            if allow_zero or Decimal(value) != 0]
             field_values.sort()
             # Print label
             if class_name in label_map:
@@ -1153,7 +1155,7 @@ def _write_libsvm_file(path, ids, classes, features, feat_vectorizer, label_map)
                 print(' |', end=' ', file=f)
             print(' '.join(('{}={}'.format(feat_vectorizer.vocabulary_[field]
                                            + 1, field) for field, value in
-                           feature_dict.items() if Decimal(value) != 0)),
+                           feature_dict.items() if allow_zero or Decimal(value) != 0)),
                   file=f)
 
 
@@ -1177,12 +1179,11 @@ def _write_megam_file(path, ids, classes, features, feat_vectorizer=None):
     :type features: list of dict
     '''
 
-    # if feat_vectorizer is None:
-    #     feat_vectorizer = DictVectorizer(sparse=True)
-    if feat_vectorizer:
-        if not feat_vectorizer.vocabulary_:
-            feat_vectorizer.fit(features)
-        _features = feat_vectorizer.inverse_transform(feat_vectorizer.transform(features), reverse_onehot=False)
+    if feat_vectorizer is None:
+        feat_vectorizer = DictVectorizer(sparse=True)
+    if not feat_vectorizer.vocabulary_:
+        feat_vectorizer.fit(features)
+    _features = feat_vectorizer.inverse_transform(feat_vectorizer.transform(features), reverse_onehot=False)
 
     with open(path, 'w') as f:
         # Iterate through examples
@@ -1386,7 +1387,6 @@ def write_feature_file(path, ids, classes, features, feat_vectorizer=None,
         # Convert features to list of dicts if given an array-like & vectorizer
         else:
             features = feat_vectorizer.inverse_transform(features)
-    print(features)
 
     # Create ID generator if necessary
     if ids is None or skip_ids is True:
