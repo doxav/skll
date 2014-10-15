@@ -29,7 +29,9 @@ from collections import namedtuple
 from joblib.pool import MemmapingPool
 from six import iteritems, PY2, string_types, text_type
 from six.moves import map, zip
-from sklearn.feature_extraction import DictVectorizer, FeatureHasher
+# from sklearn.feature_extraction import DictVectorizer, FeatureHasher
+from sklearn.feature_extraction import FeatureHasher
+from DictVectorizer import DictVectorizer
 
 # Import QueueHandler and QueueListener for multiprocess-safe logging
 if PY2:
@@ -38,7 +40,6 @@ else:
     from logging.handlers import QueueHandler, QueueListener
 
 MAX_CONCURRENT_PROCESSES = int(os.getenv('SKLL_MAX_CONCURRENT_PROCESSES', '5'))
-
 
 ExamplesTuple = namedtuple('ExamplesTuple', ['ids', 'classes', 'features',
                                              'feat_vectorizer'])
@@ -343,13 +344,13 @@ class _LibSVMDictIter(_DictIter):
             if match.group('comments') is not None:
                 # Store mapping from feature numbers to names
                 if match.group('feat_map'):
-                    feat_map = dict(pair.split('=') for pair in
+                    feat_map = dict(pair.split('=', 1) for pair in
                                     match.group('feat_map').split())
                 else:
                     feat_map = None
                 # Store mapping from label/class numbers to names
                 if match.group('label_map'):
-                    label_map = dict(pair.split('=') for pair in
+                    label_map = dict(pair.split('=', 1) for pair in
                                      match.group('label_map').strip().split())
                 else:
                     label_map = None
@@ -678,6 +679,7 @@ def _features_for_iter_type(example_iter_type, path, quiet, sparse, label_col,
         logger = logging.getLogger(__name__)
         logger.error('The last feature file did not include any features.')
         raise
+    a=feat_vectorizer.inverse_transform(features)
     return features, feat_vectorizer
 
 
@@ -1117,17 +1119,17 @@ def _write_libsvm_file(path, ids, classes, features, feat_vectorizer, label_map)
     if feat_vectorizer is None or not feat_vectorizer.vocabulary_:
         feat_vectorizer = DictVectorizer(sparse=True)
         feat_vectorizer.fit(features)
+    features_ = feat_vectorizer.transform(features)
+    features_ = feat_vectorizer.inverse_transform(features_, reverse_onehot=False)
 
     with open(path, 'w') as f:
         # Iterate through examples
-        for ex_id, class_name, feature_dict in zip(ids, classes, features):
+        for ex_id, class_name, feature_dict in zip(ids, classes, features_):
             field_values = [(feat_vectorizer.vocabulary_[field] + 1, value) for
                             field, value in iteritems(feature_dict)
                             if Decimal(value) != 0]
             field_values.sort()
             # Print label
-            a1 = type(class_name)
-            a2 = (class_name in label_map)
             if class_name in label_map:
                 print('{}'.format(label_map[class_name]), end=' ', file=f)
             else:
@@ -1155,7 +1157,7 @@ def _write_libsvm_file(path, ids, classes, features, feat_vectorizer, label_map)
                   file=f)
 
 
-def _write_megam_file(path, ids, classes, features):
+def _write_megam_file(path, ids, classes, features, feat_vectorizer=None):
     '''
     Writes a feature file in .megam format with the given a list of IDs,
     classes, and features.
@@ -1174,9 +1176,17 @@ def _write_megam_file(path, ids, classes, features):
     :param features: The features for each instance.
     :type features: list of dict
     '''
+
+    # if feat_vectorizer is None:
+    #     feat_vectorizer = DictVectorizer(sparse=True)
+    if feat_vectorizer:
+        if not feat_vectorizer.vocabulary_:
+            feat_vectorizer.fit(features)
+        _features = feat_vectorizer.inverse_transform(feat_vectorizer.transform(features), reverse_onehot=False)
+
     with open(path, 'w') as f:
         # Iterate through examples
-        for ex_id, class_name, feature_dict in zip(ids, classes, features):
+        for ex_id, class_name, feature_dict in zip(ids, classes, _features):
             # Don't try to add class column if this is label-less data
             if ex_id is not None:
                 print('# {}'.format(ex_id), file=f)
@@ -1282,7 +1292,7 @@ def _write_sub_feature_file(path, ids, classes, features, filter_features,
         _write_libsvm_file(path, ids, classes, features, feat_vectorizer, label_map)
     # Create .megam file if asked
     elif ext == ".megam":
-        _write_megam_file(path, ids, classes, features)
+        _write_megam_file(path, ids, classes, features, feat_vectorizer)
     # Create ARFF file if asked
     elif ext == ".arff":
         _write_arff_file(path, ids, classes, features, label_col,
@@ -1368,6 +1378,7 @@ def write_feature_file(path, ids, classes, features, feat_vectorizer=None,
 
     # Convert feature array to list of dicts if given a feat vectorizer,
     # otherwise fail.  Only necessary if we were given an array.
+    print(features)
     if isinstance(features, np.ndarray) or feat_vectorizer:
         if feat_vectorizer is None:
             raise ValueError('If `feat_vectorizer` is unspecified, you must '
@@ -1375,6 +1386,7 @@ def write_feature_file(path, ids, classes, features, feat_vectorizer=None,
         # Convert features to list of dicts if given an array-like & vectorizer
         else:
             features = feat_vectorizer.inverse_transform(features)
+    print(features)
 
     # Create ID generator if necessary
     if ids is None or skip_ids is True:
@@ -1398,7 +1410,8 @@ def write_feature_file(path, ids, classes, features, feat_vectorizer=None,
                                 label_col=label_col,
                                 arff_regression=arff_regression,
                                 arff_relation=arff_relation,
-                                label_map=label_map)
+                                label_map=label_map,
+                                feat_vectorizer=feat_vectorizer)
     # Otherwise write one feature file per subset
     else:
         ids = list(ids)
@@ -1411,5 +1424,6 @@ def write_feature_file(path, ids, classes, features, feat_vectorizer=None,
                                     set(filter_features), label_col=label_col,
                                     arff_regression=arff_regression,
                                     arff_relation=arff_relation,
-                                    label_map=label_map)
+                                    label_map=label_map,
+                                    feat_vectorizer=feat_vectorizer)
 
